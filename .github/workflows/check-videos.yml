@@ -2,6 +2,12 @@ name: Check T-Minus365 videos
 
 on:
   workflow_dispatch:
+    inputs:
+      force_export:
+        description: Regenerate the latest transcript JSON
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "*/30 * * * *"
 
@@ -33,19 +39,23 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Check latest video transcript
+      - name: Export latest video transcript
         env:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
+          FORCE_EXPORT: ${{ github.event_name == 'workflow_dispatch' && inputs.force_export == true && 'true' || 'false' }}
         run: python src/check_feed.py
 
-      - name: Persist processed video ID
+      - name: Publish transcript JSON and processed video ID
         run: |
           git add state/last_video_id.txt
+          if [ -f outbox/latest.json ]; then
+            git add outbox/latest.json
+          fi
           if git diff --cached --quiet; then
-            echo "Latest video was already processed."
+            echo "Latest video was already published."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Record processed T-Minus365 video"
+          git commit -m "Publish T-Minus365 transcript"
           git push
