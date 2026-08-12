@@ -1,2 +1,1 @@
-feedparser==6.0.14
-youtube-transcript-api==1.2.4
+# Runtime uses only Python's standard library.

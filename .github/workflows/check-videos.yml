@@ -2,8 +2,6 @@ name: Check T-Minus365 videos
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
 
 permissions:
   contents: read
@@ -30,4 +28,6 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Check latest video transcript
+        env:
+          SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
         run: python src/check_feed.py
