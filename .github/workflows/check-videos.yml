@@ -2,9 +2,15 @@ name: Check T-Minus365 videos
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: tminus365-monitor
+  cancel-in-progress: false
 
 jobs:
   check-video:
@@ -31,3 +37,15 @@ jobs:
         env:
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
         run: python src/check_feed.py
+
+      - name: Persist processed video ID
+        run: |
+          git add state/last_video_id.txt
+          if git diff --cached --quiet; then
+            echo "Latest video was already processed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Record processed T-Minus365 video"
+          git push

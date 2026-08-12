@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 import inspect
 import json
+import tempfile
 import unittest
 
 from src import check_feed
@@ -203,6 +204,65 @@ class CheckFeedTests(unittest.TestCase):
             output,
         )
         self.assertIn("TRANSCRIPT:\nCloud transcript works", output)
+
+    def test_run_skips_transcript_for_processed_video(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+
+        def unexpected_opener(_request, timeout):
+            self.fail(
+                f"Supadata must not be called for a processed video (timeout={timeout})"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "last_video_id.txt"
+            state_path.write_text("abc123xyz89\n", encoding="utf-8")
+
+            output = check_feed.run(
+                parser=lambda _: parsed_feed,
+                api_key="secret-value",
+                opener=unexpected_opener,
+                state_path=state_path,
+            )
+
+        self.assertIn("STATUS:\nALREADY PROCESSED", output)
+        self.assertIn("VIDEO ID:\nabc123xyz89", output)
+        self.assertNotIn("TRANSCRIPT:", output)
+
+    def test_run_persists_video_id_after_transcript_success(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state" / "last_video_id.txt"
+            check_feed.run(
+                parser=lambda _: parsed_feed,
+                api_key="secret-value",
+                opener=lambda _request, timeout: FakeHttpResponse(
+                    {"content": "Cloud transcript works"}
+                ),
+                state_path=state_path,
+            )
+
+            self.assertEqual(
+                state_path.read_text(encoding="utf-8"),
+                "abc123xyz89\n",
+            )
+
+    def test_run_does_not_persist_video_id_when_transcript_fails(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state" / "last_video_id.txt"
+            with self.assertRaisesRegex(RuntimeError, "Transcript is empty"):
+                check_feed.run(
+                    parser=lambda _: parsed_feed,
+                    api_key="secret-value",
+                    opener=lambda _request, timeout: FakeHttpResponse(
+                        {"content": ""}
+                    ),
+                    state_path=state_path,
+                )
+
+            self.assertFalse(state_path.exists())
 
     def test_main_prints_runner_output(self):
         self.assertTrue(hasattr(check_feed, "main"))

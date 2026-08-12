@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -15,6 +16,7 @@ FEED_URL = (
     "?channel_id=UCePaXDDk5kl3g7FcJ5gH5AQ"
 )
 SUPADATA_TRANSCRIPT_URL = "https://api.supadata.ai/v1/transcript"
+DEFAULT_STATE_PATH = Path("state/last_video_id.txt")
 ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
 MEDIA_NAMESPACE = "http://search.yahoo.com/mrss/"
 YOUTUBE_NAMESPACE = "http://www.youtube.com/xml/schemas/2015"
@@ -204,16 +206,38 @@ def format_output(video: Video, transcript: str) -> str:
     )
 
 
+def format_already_processed(video: Video) -> str:
+    return "\n\n".join(
+        [
+            "STATUS:\nALREADY PROCESSED",
+            f"TITLE:\n{video.title}",
+            f"PUBLISHED:\n{video.published}",
+            f"LINK:\n{video.link}",
+            f"VIDEO ID:\n{video.id}",
+        ]
+    )
+
+
 def run(
     feed_url: str = FEED_URL,
     parser: Callable[[str], Any] = parse_feed,
     api_key: str | None = None,
     opener: Callable[..., Any] = urlopen,
-    state_path: Any = None,
+    state_path: Path | str | None = DEFAULT_STATE_PATH,
 ) -> str:
-    del state_path  # Duplicate prevention is enabled after the cloud proof succeeds.
     video = get_latest_video(feed_url=feed_url, parser=parser)
+    resolved_state_path = Path(state_path) if state_path is not None else None
+    if resolved_state_path is not None and resolved_state_path.is_file():
+        processed_video_id = resolved_state_path.read_text(
+            encoding="utf-8"
+        ).strip()
+        if processed_video_id == video.id:
+            return format_already_processed(video)
+
     transcript = get_transcript(video.id, api_key=api_key, opener=opener)
+    if resolved_state_path is not None:
+        resolved_state_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_state_path.write_text(f"{video.id}\n", encoding="utf-8")
     return format_output(video, transcript)
 
 

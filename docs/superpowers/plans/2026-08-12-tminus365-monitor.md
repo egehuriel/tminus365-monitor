@@ -17,10 +17,10 @@ scheduled monitoring without duplicate transcript requests.
 
 ## Phase 2: Safe schedule
 
-- [ ] Add a persisted last-processed video ID.
-- [ ] Skip Supadata when the latest feed video was already processed.
-- [ ] Persist state only after transcript extraction succeeds.
-- [ ] Restore the 30-minute GitHub Actions schedule.
+- [x] Add a persisted last-processed video ID.
+- [x] Skip Supadata when the latest feed video was already processed.
+- [x] Persist state only after transcript extraction succeeds.
+- [x] Restore the 30-minute GitHub Actions schedule.
 - [ ] Verify one new-video run and one duplicate-skip run.
 
 ## Deferred
