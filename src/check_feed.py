@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +9,8 @@ from urllib.request import Request, urlopen
 import json
 import os
 import xml.etree.ElementTree as ElementTree
+
+from src import transcript_export
 
 
 FEED_URL = (
@@ -193,15 +195,16 @@ def get_transcript(
     return transcript
 
 
-def format_output(video: Video, transcript: str) -> str:
+def format_exported(video: Video, file_name: str, output_path: Path) -> str:
     return "\n\n".join(
         [
+            "STATUS:\nEXPORTED",
             f"TITLE:\n{video.title}",
             f"PUBLISHED:\n{video.published}",
             f"LINK:\n{video.link}",
             f"VIDEO ID:\n{video.id}",
-            f"DESCRIPTION:\n{video.description}",
-            f"TRANSCRIPT:\n{transcript}",
+            f"FILE:\n{file_name}",
+            f"OUTBOX:\n{output_path.as_posix()}",
         ]
     )
 
@@ -224,10 +227,19 @@ def run(
     api_key: str | None = None,
     opener: Callable[..., Any] = urlopen,
     state_path: Path | str | None = DEFAULT_STATE_PATH,
+    output_path: Path | str = transcript_export.DEFAULT_OUTBOX_PATH,
+    force_export: bool = False,
+    exporter: Callable[
+        [dict[str, object], Path | str], Path
+    ] = transcript_export.write_latest,
 ) -> str:
     video = get_latest_video(feed_url=feed_url, parser=parser)
     resolved_state_path = Path(state_path) if state_path is not None else None
-    if resolved_state_path is not None and resolved_state_path.is_file():
+    if (
+        not force_export
+        and resolved_state_path is not None
+        and resolved_state_path.is_file()
+    ):
         processed_video_id = resolved_state_path.read_text(
             encoding="utf-8"
         ).strip()
@@ -235,14 +247,37 @@ def run(
             return format_already_processed(video)
 
     transcript = get_transcript(video.id, api_key=api_key, opener=opener)
+    payload = transcript_export.build_payload(
+        video_id=video.id,
+        title=video.title,
+        published=video.published,
+        link=video.link,
+        description=video.description,
+        transcript=transcript,
+    )
+    exported_path = exporter(payload, output_path)
     if resolved_state_path is not None:
         resolved_state_path.parent.mkdir(parents=True, exist_ok=True)
         resolved_state_path.write_text(f"{video.id}\n", encoding="utf-8")
-    return format_output(video, transcript)
+    return format_exported(
+        video,
+        file_name=str(payload["fileName"]),
+        output_path=exported_path,
+    )
 
 
-def main(runner: Callable[[], str] = run) -> None:
-    print(runner())
+def environment_flag(
+    name: str,
+    environ: Mapping[str, str] = os.environ,
+) -> bool:
+    return environ.get(name, "").strip().lower() == "true"
+
+
+def main(runner: Callable[[], str] | None = None) -> None:
+    resolved_runner = runner or (
+        lambda: run(force_export=environment_flag("FORCE_EXPORT"))
+    )
+    print(resolved_runner())
 
 
 if __name__ == "__main__":

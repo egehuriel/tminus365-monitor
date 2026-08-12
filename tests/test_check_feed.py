@@ -7,6 +7,7 @@ import inspect
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src import check_feed
 
@@ -182,28 +183,29 @@ class CheckFeedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "SUPADATA_API_KEY"):
             check_feed.get_transcript("abc123xyz89", api_key="")
 
-    def test_run_formats_video_metadata_and_transcript(self):
-        self.assertTrue(hasattr(check_feed, "run"))
+    def test_run_exports_payload_and_redacts_transcript(self):
         parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
 
-        def opener(_request, timeout):
-            self.assertEqual(timeout, 30)
-            return FakeHttpResponse({"content": "Cloud transcript works"})
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "outbox" / "latest.json"
+            output = check_feed.run(
+                parser=lambda _: parsed_feed,
+                api_key="secret-value",
+                opener=lambda _request, timeout: FakeHttpResponse(
+                    {"content": "Cloud transcript works"}
+                ),
+                state_path=None,
+                output_path=output_path,
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
 
-        output = check_feed.run(
-            parser=lambda _: parsed_feed,
-            api_key="secret-value",
-            opener=opener,
-            state_path=None,
-        )
-
-        self.assertIn("TITLE:\nLatest T-Minus365 video", output)
-        self.assertIn("VIDEO ID:\nabc123xyz89", output)
-        self.assertIn(
-            "LINK:\nhttps://www.youtube.com/watch?v=abc123xyz89",
-            output,
-        )
-        self.assertIn("TRANSCRIPT:\nCloud transcript works", output)
+        self.assertEqual(payload["videoId"], "abc123xyz89")
+        self.assertEqual(payload["transcript"], "Cloud transcript works")
+        self.assertEqual(payload["fileName"], "2026-08-12_abc123xyz89.json")
+        self.assertIn("STATUS:\nEXPORTED", output)
+        self.assertIn("FILE:\n2026-08-12_abc123xyz89.json", output)
+        self.assertNotIn("Cloud transcript works", output)
+        self.assertNotIn("TRANSCRIPT:", output)
 
     def test_run_skips_transcript_for_processed_video(self):
         parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
@@ -215,6 +217,7 @@ class CheckFeedTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "last_video_id.txt"
+            output_path = Path(directory) / "outbox" / "latest.json"
             state_path.write_text("abc123xyz89\n", encoding="utf-8")
 
             output = check_feed.run(
@@ -222,7 +225,10 @@ class CheckFeedTests(unittest.TestCase):
                 api_key="secret-value",
                 opener=unexpected_opener,
                 state_path=state_path,
+                output_path=output_path,
             )
+
+            self.assertFalse(output_path.exists())
 
         self.assertIn("STATUS:\nALREADY PROCESSED", output)
         self.assertIn("VIDEO ID:\nabc123xyz89", output)
@@ -233,6 +239,7 @@ class CheckFeedTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "state" / "last_video_id.txt"
+            output_path = Path(directory) / "outbox" / "latest.json"
             check_feed.run(
                 parser=lambda _: parsed_feed,
                 api_key="secret-value",
@@ -240,6 +247,7 @@ class CheckFeedTests(unittest.TestCase):
                     {"content": "Cloud transcript works"}
                 ),
                 state_path=state_path,
+                output_path=output_path,
             )
 
             self.assertEqual(
@@ -263,6 +271,72 @@ class CheckFeedTests(unittest.TestCase):
                 )
 
             self.assertFalse(state_path.exists())
+
+    def test_run_force_export_ignores_matching_state(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state" / "last_video_id.txt"
+            output_path = Path(directory) / "outbox" / "latest.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("abc123xyz89\n", encoding="utf-8")
+
+            output = check_feed.run(
+                parser=lambda _: parsed_feed,
+                api_key="secret-value",
+                opener=lambda _request, timeout: FakeHttpResponse(
+                    {"content": "Forced transcript"}
+                ),
+                state_path=state_path,
+                output_path=output_path,
+                force_export=True,
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["transcript"], "Forced transcript")
+        self.assertIn("STATUS:\nEXPORTED", output)
+
+    def test_run_does_not_persist_state_when_export_fails(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+
+        def failing_exporter(payload, path):
+            self.assertEqual(payload["videoId"], "abc123xyz89")
+            raise OSError("disk unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state" / "last_video_id.txt"
+            with self.assertRaisesRegex(OSError, "disk unavailable"):
+                check_feed.run(
+                    parser=lambda _: parsed_feed,
+                    api_key="secret-value",
+                    opener=lambda _request, timeout: FakeHttpResponse(
+                        {"content": "Cloud transcript works"}
+                    ),
+                    state_path=state_path,
+                    output_path=Path(directory) / "outbox" / "latest.json",
+                    exporter=failing_exporter,
+                )
+
+            self.assertFalse(state_path.exists())
+
+    def test_environment_flag_accepts_only_true(self):
+        self.assertTrue(
+            check_feed.environment_flag("FORCE_EXPORT", {"FORCE_EXPORT": "TRUE"})
+        )
+        self.assertFalse(
+            check_feed.environment_flag("FORCE_EXPORT", {"FORCE_EXPORT": "false"})
+        )
+        self.assertFalse(check_feed.environment_flag("FORCE_EXPORT", {}))
+
+    def test_main_uses_force_export_environment(self):
+        with patch.object(check_feed, "run", return_value="EXPORTED") as runner:
+            with patch.dict(check_feed.os.environ, {"FORCE_EXPORT": "true"}):
+                output = StringIO()
+                with redirect_stdout(output):
+                    check_feed.main()
+
+        runner.assert_called_once_with(force_export=True)
+        self.assertEqual(output.getvalue(), "EXPORTED\n")
 
     def test_main_prints_runner_output(self):
         self.assertTrue(hasattr(check_feed, "main"))
