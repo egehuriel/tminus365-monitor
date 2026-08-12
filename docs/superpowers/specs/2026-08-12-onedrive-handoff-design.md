@@ -1,82 +1,78 @@
-# T-Minus365 OneDrive Handoff Design
+# T-Minus365 Standard-Only OneDrive Handoff Design
 
 ## Goal
 
 Deliver each newly extracted T-Minus365 transcript from GitHub Actions to the
-user's company OneDrive for Business. A Power Automate receiver flow will accept
-the transcript over HTTPS and create one machine-readable JSON file per video in
-`/TMinus365/Transcripts`. Downstream Power Automate processing begins from that
-folder and remains outside this implementation phase.
+user's company OneDrive for Business without Power Automate Premium, an Azure
+application registration, or another paid relay service.
+
+The public repository may contain transcript JSON because every exported field
+comes from the public T-Minus365 YouTube video. Credentials and company account
+details remain private.
+
+## Decision and Superseded Design
+
+The earlier design used Power Automate's **When an HTTP request is received**
+trigger. The user's tenant identified that trigger as Premium, so that receiver
+flow is intentionally abandoned. No implementation may depend on a Power
+Automate webhook or the `POWER_AUTOMATE_WEBHOOK_URL` secret.
+
+The replacement inverts the handoff:
+
+1. GitHub Actions publishes a stable public JSON file in this repository.
+2. A scheduled Power Automate flow pulls that file into OneDrive using only the
+   Standard OneDrive for Business connector.
+3. The flow creates an immutable, deterministic transcript file only when it
+   does not already exist.
 
 ## Scope
 
 This phase includes:
 
-- one Power Automate HTTP receiver flow;
-- one OneDrive for Business destination folder;
-- a versioned JSON payload contract;
-- GitHub Actions delivery through a secret webhook URL;
-- duplicate-safe file creation;
-- retry-safe processed-video state;
-- a manual force-delivery option for testing and recovery; and
-- local and cloud verification of a real OneDrive file.
+- producing `outbox/latest.json` from the latest T-Minus365 video;
+- committing that file from GitHub Actions together with processed-video state;
+- a scheduled Standard-only Power Automate flow;
+- OneDrive staging and transcript folders;
+- duplicate-safe transcript file creation;
+- retry behavior for temporary GitHub or OneDrive failures;
+- a manual force-export option for testing and recovery; and
+- end-to-end verification of one real OneDrive transcript file.
 
-This phase does not include classification, summarization, Teams delivery,
-email delivery, or replacement of the existing downstream Power Automate flow.
+This phase does not include summarization, classification, Teams delivery,
+email delivery, or downstream business processing.
 
 ## Architecture
-
-The existing GitHub Actions monitor remains responsible for RSS polling and
-Supadata transcript extraction. For a new video, it builds a JSON payload and
-posts it to a separate Power Automate flow whose trigger is **When an HTTP
-request is received**.
-
-The receiver flow validates the request shape, derives a deterministic filename,
-checks the OneDrive target folder for that filename, and creates the file only
-when it is absent. It then sends an explicit success response to GitHub Actions.
-The monitor writes `state/last_video_id.txt` only after that success response.
 
 ```text
 YouTube RSS
     -> GitHub Actions
-    -> Supadata transcript
-    -> HTTPS JSON POST
-    -> Power Automate receiver
-    -> OneDrive for Business /TMinus365/Transcripts
+    -> Supadata transcript extraction
+    -> public outbox/latest.json in GitHub
+    -> scheduled Power Automate flow (Standard only)
+    -> OneDrive /TMinus365/Staging/latest.json
+    -> duplicate check
+    -> OneDrive /TMinus365/Transcripts/YYYY-MM-DD_VIDEO_ID.json
     -> downstream Power Automate flow (later phase)
 ```
 
-## OneDrive Layout
+No inbound webhook, HTTP connector, custom connector, Azure application, or
+Premium Power Automate capability is part of this architecture.
 
-The user creates this folder once in the company OneDrive for Business account:
+## Public JSON Contract
 
-```text
-/TMinus365/Transcripts/
-```
-
-Each video produces one file with this deterministic pattern:
+GitHub Actions writes UTF-8 JSON to:
 
 ```text
-YYYY-MM-DD_VIDEO_ID.json
+outbox/latest.json
 ```
 
-Example:
-
-```text
-2026-08-12_OoqeMllPjQk.json
-```
-
-The publication date comes from the YouTube RSS entry. The video ID prevents
-same-day filename collisions and supplies a stable idempotency key.
-
-## Payload Contract
-
-GitHub Actions sends UTF-8 JSON with `Content-Type: application/json`:
+The document uses this versioned contract:
 
 ```json
 {
   "schemaVersion": 1,
   "videoId": "OoqeMllPjQk",
+  "fileName": "2026-08-12_OoqeMllPjQk.json",
   "title": "Video title",
   "published": "2026-08-12T08:00:00+00:00",
   "link": "https://www.youtube.com/watch?v=OoqeMllPjQk",
@@ -85,107 +81,139 @@ GitHub Actions sends UTF-8 JSON with `Content-Type: application/json`:
 }
 ```
 
-All seven fields are required. `schemaVersion` is the integer `1`; the remaining
-fields are strings. `videoId`, `title`, `published`, `link`, and `transcript` must
-be nonempty. An empty description is allowed.
+All eight fields are required. `schemaVersion` is the integer `1`; the remaining
+fields are strings. `description` may be empty. `fileName` is derived from the
+publication date and video ID using:
 
-The Power Automate request trigger uses a JSON schema matching this contract.
-The OneDrive file content is the complete received JSON object rather than only
-the transcript, so the downstream flow can use metadata without reparsing text.
+```text
+YYYY-MM-DD_VIDEO_ID.json
+```
 
-## Power Automate Receiver
+The JSON must not contain the Supadata key, GitHub credentials, Microsoft
+account information, OneDrive identifiers, environment variables, workflow
+URLs, or other secrets.
 
-Create a separate flow named `TMinus365 Transcript Receiver` with these logical
-steps:
+## GitHub Actions Behavior
 
-1. Trigger on **When an HTTP request is received** using the payload schema.
-2. Compose the filename from the UTC publication date and video ID.
-3. Inspect `/TMinus365/Transcripts` for the deterministic filename.
-4. If the file already exists, do not overwrite it; return HTTP 200 with
-   `{"status":"already_exists","videoId":"...","fileName":"..."}`.
-5. If the file does not exist, create it with the complete request body as its
-   content; return HTTP 200 with
-   `{"status":"created","videoId":"...","fileName":"..."}`.
+The existing monitor continues to poll the YouTube RSS feed every 30 minutes.
+For a new latest video it:
 
-The receiver flow is solely a secure ingestion boundary. The existing RSS flow
-will later be replaced or adapted into a OneDrive **When a file is created** flow
-that reads these JSON files.
+1. fetches the English transcript through Supadata;
+2. builds the exact JSON contract;
+3. writes `outbox/latest.json` with stable formatting and a trailing newline;
+4. updates `state/last_video_id.txt`; and
+5. commits both files in the same workflow commit.
 
-## GitHub Actions Delivery
+The state file and JSON output are written only after transcript extraction and
+payload validation succeed. A failure before the commit leaves the previously
+published JSON and state unchanged so the next scheduled run can retry.
 
-The generated Power Automate callback URL is stored in the repository secret
-`POWER_AUTOMATE_WEBHOOK_URL`. It is never committed, printed, or included in an
-error message. GitHub Actions supplies it to the Python process as an environment
-variable.
+A normal run skips a video whose ID matches `state/last_video_id.txt` and does
+not consume another Supadata transcript request. Manual dispatch exposes a
+boolean force option that regenerates `outbox/latest.json` for the current video
+even when the state matches. Logs show metadata and the output filename but not
+the transcript or any secret.
 
-The monitor sends the payload after transcript extraction. It accepts only an
-HTTP 2xx response whose JSON status is `created` or `already_exists`, whose
-video ID matches the request, and whose filename matches the deterministic
-filename. Network errors, timeouts, non-2xx responses, or malformed success
-responses fail the workflow and leave `state/last_video_id.txt` unchanged so a
-later scheduled run retries delivery.
+## Power Automate Flow
 
-After successful delivery, logs contain the video ID, title, OneDrive delivery
-status, and filename. They do not contain the webhook URL, API keys, or full
-transcript.
+Create a scheduled cloud flow named:
 
-The scheduled workflow uses normal duplicate prevention. Manual dispatch exposes
-a boolean `force_delivery` input, defaulting to false. When true, the workflow
-re-fetches and re-delivers the current latest video even if its ID matches the
-state file. The deterministic OneDrive filename makes this recovery operation
-safe: an existing file returns success without being overwritten.
+```text
+TMinus365 Transcript Importer
+```
+
+It runs every 30 minutes and uses only built-in controls and the Standard
+OneDrive for Business connector:
+
+1. **Recurrence** triggers the flow.
+2. **Upload file from URL** downloads the public raw GitHub URL for
+   `outbox/latest.json` to `/TMinus365/Staging/latest.json` with overwrite
+   enabled. A timestamp query parameter is added to the source URL to avoid a
+   stale CDN response.
+3. **Delay** waits 30 seconds because the OneDrive upload-from-URL operation can
+   report success before the transfer has finished.
+4. **Get file content using path** reads the staging file.
+5. **Parse JSON** validates the eight-field version 1 contract.
+6. **List files in folder** reads `/TMinus365/Transcripts` and an exact-name
+   filter compares each item with the payload's `fileName`.
+7. If an exact match exists, the flow ends successfully without changing it.
+8. If no match exists, **Create file** writes the complete staging JSON to
+   `/TMinus365/Transcripts/<fileName>`.
+
+The staging folder is an implementation detail. Downstream automation watches
+only `/TMinus365/Transcripts`, so refreshing `Staging/latest.json` does not
+produce a downstream event.
+
+## OneDrive Layout
+
+The company OneDrive account owns these folders:
+
+```text
+/TMinus365/
+├── Staging/
+│   └── latest.json
+└── Transcripts/
+    └── YYYY-MM-DD_VIDEO_ID.json
+```
+
+Files in `Transcripts` are immutable for this phase. A forced GitHub export may
+refresh the staging file, but the importer never overwrites an existing
+deterministic transcript file.
 
 ## Error Handling and Idempotency
 
-There are two independent duplicate guards:
+- A GitHub extraction or serialization failure leaves both outbox and state
+  unchanged and causes the workflow to fail.
+- A Power Automate download, read, parse, or OneDrive failure causes that run to
+  fail. The next 30-minute recurrence retries automatically.
+- If an upload-from-URL run leaves the previous staging file in place, the exact
+  filename check makes processing that stale file a harmless no-op.
+- A raw GitHub caching delay is handled by the timestamp query parameter and the
+  later scheduled retry.
+- The deterministic filename makes repeated Power Automate runs idempotent.
+- The importer never sends status back to GitHub; GitHub state represents
+  successful transcript publication, while OneDrive retries independently.
 
-- GitHub skips videos whose ID matches `state/last_video_id.txt` during normal
-  scheduled runs.
-- Power Automate treats an existing deterministic filename as a successful
-  no-op.
+The current monitor already handles only the latest RSS entry. This design does
+not add a multi-video backlog queue; that is outside the present scope.
 
-This handles retries after ambiguous network outcomes: if OneDrive creation
-succeeds but GitHub never receives the response, the next delivery sees the
-existing file, returns success, and then advances GitHub state.
+## Security and Cost
 
-The OneDrive file must not be overwritten automatically. A corrected transcript
-can be resent only after a deliberate file removal or a future versioned update
-feature, neither of which is part of this phase.
-
-## Security
-
-- The Power Automate callback URL is a credential and is stored only as a GitHub
-  Actions secret.
-- The public repository contains no Microsoft credentials, tenant identifiers,
-  webhook query parameters, or transcript files.
-- The receiver writes only to the company OneDrive folder selected in its
-  authenticated OneDrive for Business connection.
-- The workflow grants only the existing repository-content permission needed to
-  persist the processed-video state.
-- Action logs exclude the full transcript after handoff is enabled.
-
-If the callback URL is exposed, rotate it by replacing the Power Automate HTTP
-trigger or regenerating its URL and updating the GitHub secret.
+- Transcript JSON is public by explicit user approval and contains only public
+  YouTube-derived content.
+- `SUPADATA_API_KEY` remains a GitHub Actions secret and is never serialized or
+  logged.
+- Microsoft credentials stay inside the authenticated OneDrive for Business
+  connection in Power Automate.
+- No Power Automate callback URL or Microsoft token is stored in GitHub.
+- The Power Automate flow contains only Standard connector actions and built-in
+  controls; it must save without a Premium license warning.
+- The existing Premium HTTP receiver flow is not used and may be deleted by the
+  user after the replacement passes acceptance testing.
 
 ## Testing and Acceptance
 
-Implementation uses test-driven development with network-free unit tests for:
+Implementation uses test-driven development with network-free tests for:
 
-- exact JSON serialization;
-- required webhook configuration;
-- successful 2xx delivery;
-- non-2xx, timeout, and malformed-response failures;
-- state persistence only after confirmed delivery;
-- forced delivery despite matching state; and
-- redacted output that excludes transcript and credentials.
+- deterministic filename generation;
+- the exact version 1 JSON contract;
+- stable UTF-8 JSON serialization;
+- rejection of an empty transcript or required metadata;
+- normal duplicate skip behavior;
+- forced regeneration when state already matches; and
+- console output that excludes transcript text and secrets.
 
 End-to-end acceptance requires:
 
-1. the receiver flow saves successfully and exposes its callback URL;
-2. `POWER_AUTOMATE_WEBHOOK_URL` exists as a GitHub Actions secret;
-3. a manual `force_delivery` run succeeds on the pushed `main` commit;
-4. exactly one correctly named JSON file appears in the company OneDrive folder;
-5. the file contains all payload fields and a nonempty English transcript;
-6. a second forced run returns `already_exists` without changing the file; and
-7. a normal scheduled run skips the already processed video without consuming a
-   Supadata transcript credit.
+1. all local unit tests pass;
+2. a manual forced GitHub Actions run succeeds on pushed `main`;
+3. `outbox/latest.json` is publicly readable through its raw GitHub URL;
+4. the Power Automate importer saves with no Premium license warning;
+5. a manual importer run creates exactly one correctly named JSON file in
+   `/TMinus365/Transcripts`;
+6. the OneDrive file contains all eight fields and a nonempty English
+   transcript;
+7. a second importer run creates no duplicate and does not overwrite the file;
+   and
+8. a normal GitHub Actions run skips the already processed video without
+   consuming another Supadata transcript request.
