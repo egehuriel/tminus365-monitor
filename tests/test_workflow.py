@@ -74,6 +74,32 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertNotIn("POWER_AUTOMATE_WEBHOOK_URL", environment_names)
 
+    def test_model_setup_runs_only_when_classification_is_required(self):
+        detect_step = self.step_named("Detect transcript requiring analysis")
+        self.assertEqual(detect_step["id"], "analysis")
+        self.assertIn("should_run=true", detect_step["run"])
+
+        gated_steps = (
+            "Cache local model",
+            "Install local inference runtime",
+            "Download local model",
+            "Classify Microsoft 365 update",
+        )
+        for name in gated_steps:
+            with self.subTest(step=name):
+                self.assertEqual(
+                    self.step_named(name)["if"],
+                    "steps.analysis.outputs.should_run == 'true'",
+                )
+
+    def test_classification_uses_local_model_without_new_secret(self):
+        classify_step = self.step_named("Classify Microsoft 365 update")
+
+        self.assertIn("src/classify_update.py", classify_step["run"])
+        self.assertIn("outbox/latest.json", classify_step["run"])
+        self.assertIn(".cache/models", classify_step["run"])
+        self.assertEqual(classify_step.get("env", {}), {})
+
 
 if __name__ == "__main__":
     unittest.main()
