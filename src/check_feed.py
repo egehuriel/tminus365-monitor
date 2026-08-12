@@ -10,7 +10,10 @@ import json
 import os
 import xml.etree.ElementTree as ElementTree
 
-from src import transcript_export
+if __package__:
+    from src import transcript_export
+else:
+    import transcript_export
 
 
 FEED_URL = (

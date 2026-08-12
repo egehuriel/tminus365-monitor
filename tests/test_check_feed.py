@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 import inspect
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -49,6 +51,20 @@ class CheckFeedTests(unittest.TestCase):
     def test_check_feed_module_exists(self):
         module_path = Path(__file__).parents[1] / "src" / "check_feed.py"
         self.assertTrue(module_path.is_file())
+
+    def test_check_feed_imports_when_src_is_the_script_directory(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys; sys.path.insert(0, 'src'); import check_feed",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_get_latest_video_returns_normalized_video(self):
         self.assertTrue(hasattr(check_feed, "get_latest_video"))
