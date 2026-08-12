@@ -12,8 +12,8 @@ scheduled monitoring without duplicate transcript requests.
 - [x] Add network-free tests for Atom parsing, request construction, transcript
   parsing, missing configuration, and output formatting.
 - [x] Make the workflow manual-only during the first Supadata test.
-- [ ] Push and manually dispatch the workflow.
-- [ ] Confirm the cloud log contains a nonempty English transcript.
+- [x] Push and manually dispatch the workflow.
+- [x] Confirm the cloud run completes with a nonempty English transcript.
 
 ## Phase 2: Safe schedule
 
@@ -21,7 +21,7 @@ scheduled monitoring without duplicate transcript requests.
 - [x] Skip Supadata when the latest feed video was already processed.
 - [x] Persist state only after transcript extraction succeeds.
 - [x] Restore the 30-minute GitHub Actions schedule.
-- [ ] Verify one new-video run and one duplicate-skip run.
+- [x] Verify one new-video run and one duplicate-skip run.
 
 ## Deferred
 

@@ -16,9 +16,10 @@ caption track from Supadata's transcript endpoint with `mode=native` and
 The Supadata key is supplied only through the GitHub Actions repository secret
 `SUPADATA_API_KEY`. It is never stored in source control or printed to logs.
 
-The first Supadata workflow revision is manual-only. After one successful cloud
-run, processed-video state is added before restoring the 30-minute schedule so
-repeated checks do not spend one transcript credit on the same video.
+The workflow supports manual dispatch and a 30-minute schedule. After a
+successful transcript request, it stores the processed video ID in
+`state/last_video_id.txt`. Later runs skip Supadata when that ID is still the
+latest feed entry, so repeated checks do not spend transcript credits.
 
 ## Failure Behavior
 
@@ -36,5 +37,6 @@ The cloud proof is complete only when a manually dispatched GitHub Actions run:
 3. prints a nonempty video ID, title, link, and English transcript; and
 4. does not expose `SUPADATA_API_KEY`.
 
-Only after that proof will duplicate prevention and scheduled execution be
-enabled. Power Automate integration remains deferred.
+This proof completed in GitHub Actions run `31582045598`. State persistence was
+verified in run `31582321966`, and the duplicate-skip path was verified in run
+`31582378969`. Power Automate integration remains deferred.
