@@ -111,7 +111,7 @@ def parse_model_output(raw: str) -> Analysis:
         raise RuntimeError("Local model did not return valid JSON.") from error
     if not isinstance(value, dict):
         raise RuntimeError("Local model output must be a JSON object.")
-    if tuple(value) != ("decision", "message"):
+    if set(value) != {"decision", "message"}:
         raise RuntimeError("Local model output must contain decision and message only.")
 
     decision = value.get("decision")
