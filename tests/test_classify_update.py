@@ -60,6 +60,15 @@ class ClassifyUpdateTests(unittest.TestCase):
         self.assertEqual(analysis.decision, "POST")
         self.assertEqual(analysis.message, "📌 Feature\nSummary:\n- Changed")
 
+    def test_parse_model_output_ignores_additional_model_fields(self):
+        analysis = classify_update.parse_model_output(
+            '{"decision":"POST","message":"📌 Feature",'
+            '"explanation":"Confirmed from the supplied source."}'
+        )
+
+        self.assertEqual(analysis.decision, "POST")
+        self.assertEqual(analysis.message, "📌 Feature")
+
     def test_parse_model_output_rejects_invalid_decision(self):
         with self.assertRaisesRegex(RuntimeError, "decision must be POST or SKIP"):
             classify_update.parse_model_output(
