@@ -100,6 +100,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(".cache/models", classify_step["run"])
         self.assertEqual(classify_step.get("env", {}), {})
 
+    def test_local_inference_runtime_is_built_for_the_runner(self):
+        install_step = self.step_named("Install local inference runtime")
+        command = install_step["run"]
+
+        self.assertIn("--no-binary=llama-cpp-python", command)
+        self.assertIn("--no-cache-dir", command)
+        self.assertNotIn("abetlen.github.io", command)
+
 
 if __name__ == "__main__":
     unittest.main()
