@@ -73,17 +73,21 @@ Return exactly one JSON object and no other text:
 - Eligible: {{"decision":"POST","message":"<final Teams message>"}}
 - Ineligible: {{"decision":"SKIP","message":""}}
 
-For POST, the message must use this structure:
-📌 [Title]
+For POST, write the Teams message in Turkish. Keep the video title exactly as
+supplied in SOURCE; do not translate or rewrite it. Product names, the URL, and
+the published date must also remain unchanged. Use this structure:
+📌 [Original Title]
 🎥 T-Minus365 | 📅 [Published] | 🔗 [Link]
-🏷️ Tag: [Microsoft 365, Azure, or Both]
+🏷️ Etiket: [Microsoft 365, Azure veya Her İkisi]
 
-Summary:
-- [what changed — one line]
-- [why it matters — one line]
-- [availability/rollout — include this line only if explicitly stated]
+Özet:
+- [ne değişti — bir satır, Türkçe]
+- [neden önemli — bir satır, Türkçe]
+- [kullanıma sunulma/yayın takvimi — yalnızca açıkça belirtilmişse, Türkçe]
 
-No introduction, conclusion, hype, or mention of a transcript.
+Apart from the original title and unchanged proper nouns/data specified above,
+all human-readable message text must be Turkish. Do not add an introduction,
+conclusion, hype, or mention of a transcript.
 
 SOURCE
 Title: {payload['title']}

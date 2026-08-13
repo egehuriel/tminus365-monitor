@@ -30,6 +30,18 @@ class ClassifyUpdateTests(unittest.TestCase):
         self.assertIn('"decision":"SKIP"', prompt)
         self.assertIn("transcript is the primary source", prompt.lower())
 
+    def test_build_prompt_requires_turkish_message_with_original_title(self):
+        prompt = classify_update.build_prompt(
+            self.sample_payload(title="Original English Video Title")
+        )
+
+        self.assertIn("write the Teams message in Turkish", prompt)
+        self.assertIn("Keep the video title exactly as", prompt)
+        self.assertIn("supplied in SOURCE; do not translate", prompt)
+        self.assertIn("Original English Video Title", prompt)
+        self.assertIn("🏷️ Etiket:", prompt)
+        self.assertIn("Özet:", prompt)
+
     def test_build_prompt_rejects_wrong_source_schema(self):
         with self.assertRaisesRegex(RuntimeError, "schemaVersion must be 1"):
             classify_update.build_prompt(self.sample_payload(schemaVersion=2))
