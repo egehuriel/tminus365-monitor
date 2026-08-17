@@ -71,7 +71,9 @@ availability, licensing, or details. If evidence is insufficient, choose SKIP.
 
 Return exactly one JSON object and no other text:
 - Eligible: {{"decision":"POST","message":"<final Teams message>"}}
-- Ineligible: {{"decision":"SKIP","message":""}}
+- Ineligible: {{"decision":"SKIP","message":"<final Teams message>"}}
+
+Every video must produce a non-empty Teams message.
 
 For POST, write the Teams message in Turkish. Keep the video title exactly as
 supplied in SOURCE; do not translate or rewrite it. Product names, the URL, and
@@ -84,6 +86,25 @@ the published date must also remain unchanged. Use this structure:
 - [ne değişti — bir satır, Türkçe]
 - [neden önemli — bir satır, Türkçe]
 - [kullanıma sunulma/yayın takvimi — yalnızca açıkça belirtilmişse, Türkçe]
+
+For SKIP, write the Teams message in Turkish. Clearly state that no confirmed
+Microsoft 365 or Azure update was identified, then summarize what the video
+actually discusses. Keep the original title, date, and URL unchanged. Use:
+
+📌 [Original Title]
+🎥 T-Minus365 | 📅 [Published] | 🔗 [Link]
+🏷️ Etiket: Microsoft 365 veya Azure güncellemesi değil
+
+Durum:
+- Bu videoda doğrulanabilir bir Microsoft 365 veya Azure ürün güncellemesi,
+  özellik duyurusu, yol haritası, lisanslama veya politika değişikliği bulunmadı.
+
+Video özeti:
+- [videonun ana konusu — Türkçe]
+- [anlatılan ikinci önemli nokta — Türkçe]
+- [varsa üçüncü önemli nokta — Türkçe]
+
+The SKIP summary must reflect the actual supplied source. Do not use generic filler.
 
 Apart from the original title and unchanged proper nouns/data specified above,
 all human-readable message text must be Turkish. Do not add an introduction,
@@ -125,10 +146,8 @@ def parse_model_output(raw: str) -> Analysis:
     if not isinstance(message, str):
         raise RuntimeError("Local model message must be a string.")
     message = message.strip()
-    if decision == "POST" and not message:
-        raise RuntimeError("Local model POST requires a message.")
-    if decision == "SKIP" and message:
-        raise RuntimeError("Local model SKIP message must be empty.")
+    if not message:
+        raise RuntimeError(f"Local model {decision} requires a message.")
     return Analysis(decision=decision, message=message)
 
 
@@ -139,14 +158,13 @@ def enrich_payload(
     _validate_source(payload)
     if analysis.decision not in {"POST", "SKIP"}:
         raise RuntimeError("Analysis decision must be POST or SKIP.")
-    if analysis.decision == "POST" and not analysis.message.strip():
-        raise RuntimeError("Analysis POST requires a message.")
-    if analysis.decision == "SKIP" and analysis.message:
-        raise RuntimeError("Analysis SKIP message must be empty.")
+    message = analysis.message.strip()
+    if not message:
+        raise RuntimeError(f"Analysis {analysis.decision} requires a message.")
     enriched = dict(payload)
     enriched["schemaVersion"] = 2
     enriched["decision"] = analysis.decision
-    enriched["message"] = analysis.message.strip()
+    enriched["message"] = message
     if tuple(enriched) != OUTPUT_FIELDS:
         raise RuntimeError("Analysis output does not match schema v2.")
     return enriched
@@ -188,7 +206,7 @@ def predict_local(prompt: str, model_path: Path | str) -> str:
             {"role": "user", "content": prompt},
         ],
         temperature=0,
-        max_tokens=512,
+        max_tokens=768,
         response_format={"type": "json_object"},
     )
     return _extract_chat_text(response)

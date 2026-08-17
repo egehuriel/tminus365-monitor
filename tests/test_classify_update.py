@@ -21,6 +21,19 @@ class ClassifyUpdateTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    def sample_skip_message(self):
+        return (
+            "📌 A Microsoft 365 change\n"
+            "🎥 T-Minus365 | 📅 2026-08-12T08:00:00+00:00 | "
+            "🔗 https://www.youtube.com/watch?v=abc123xyz89\n"
+            "🏷️ Etiket: Microsoft 365 veya Azure güncellemesi değil\n\n"
+            "Durum:\n"
+            "- Bu videoda doğrulanabilir bir Microsoft 365 veya Azure "
+            "güncellemesi bulunmadı.\n\n"
+            "Video özeti:\n"
+            "- Video bir yönetim ayarını açıklıyor."
+        )
+
     def test_build_prompt_contains_source_and_requires_strict_json(self):
         prompt = classify_update.build_prompt(self.sample_payload())
 
@@ -29,6 +42,10 @@ class ClassifyUpdateTests(unittest.TestCase):
         self.assertIn('"decision":"POST"', prompt)
         self.assertIn('"decision":"SKIP"', prompt)
         self.assertIn("transcript is the primary source", prompt.lower())
+        self.assertIn('"decision":"SKIP","message":"<final Teams message>"', prompt)
+        self.assertIn("Every video must produce a non-empty Teams message", prompt)
+        self.assertIn("Durum:", prompt)
+        self.assertIn("Video özeti:", prompt)
 
     def test_build_prompt_requires_turkish_message_with_original_title(self):
         prompt = classify_update.build_prompt(
@@ -47,12 +64,13 @@ class ClassifyUpdateTests(unittest.TestCase):
             classify_update.build_prompt(self.sample_payload(schemaVersion=2))
 
     def test_parse_model_output_accepts_skip_json(self):
+        message = self.sample_skip_message()
         analysis = classify_update.parse_model_output(
-            '{"decision":"SKIP","message":""}'
+            json.dumps({"decision": "SKIP", "message": message})
         )
 
         self.assertEqual(analysis.decision, "SKIP")
-        self.assertEqual(analysis.message, "")
+        self.assertEqual(analysis.message, message)
 
     def test_parse_model_output_accepts_fenced_post_json(self):
         analysis = classify_update.parse_model_output(
@@ -93,10 +111,10 @@ class ClassifyUpdateTests(unittest.TestCase):
                 '{"decision":"POST","message":"  "}'
             )
 
-    def test_parse_model_output_rejects_skip_with_message(self):
-        with self.assertRaisesRegex(RuntimeError, "SKIP message must be empty"):
+    def test_parse_model_output_rejects_skip_without_message(self):
+        with self.assertRaisesRegex(RuntimeError, "SKIP requires a message"):
             classify_update.parse_model_output(
-                '{"decision":"SKIP","message":"do not send"}'
+                '{"decision":"SKIP","message":"  "}'
             )
 
     def test_enrich_payload_returns_exact_v2_contract(self):
@@ -127,6 +145,7 @@ class ClassifyUpdateTests(unittest.TestCase):
     def test_classify_file_writes_valid_json_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
+            message = self.sample_skip_message()
             path.write_text(
                 json.dumps(self.sample_payload(), ensure_ascii=False),
                 encoding="utf-8",
@@ -134,14 +153,17 @@ class ClassifyUpdateTests(unittest.TestCase):
 
             result = classify_update.classify_file(
                 path,
-                predictor=lambda _prompt: '{"decision":"SKIP","message":""}',
+                predictor=lambda _prompt: json.dumps(
+                    {"decision": "SKIP", "message": message},
+                    ensure_ascii=False,
+                ),
             )
             written = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(result, path)
             self.assertEqual(written["schemaVersion"], 2)
             self.assertEqual(written["decision"], "SKIP")
-            self.assertEqual(written["message"], "")
+            self.assertEqual(written["message"], message)
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
     def test_classify_file_preserves_v1_file_when_prediction_fails(self):
