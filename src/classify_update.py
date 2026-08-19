@@ -92,36 +92,39 @@ def _bounded_transcript(transcript: str, limit: int = MAX_TRANSCRIPT_CHARS) -> s
 
 def build_prompt(payload: dict[str, object]) -> str:
     _validate_source(payload)
-    return f"""You review one T-Minus365 YouTube video.
+    return f"""You review one T-Minus365 YouTube video and always produce a
+Teams post for it. There is no SKIP option -- every video gets a message.
 
 Determine whether it reports an actual Microsoft 365 or Azure product update,
 feature announcement, rollout, retirement, deprecation, policy change, licensing
 change, or roadmap change. The transcript is the primary source of truth. Use the
 title and description only as supporting context.
 
-Return SKIP for tutorials, how-to guides, security best-practice walkthroughs,
-troubleshooting, MSP business advice, comparisons, commentary, opinion, reaction,
-marketing, speculation, predictions, or content without a specific confirmed
-Microsoft 365 or Azure change.
-
 Use only facts explicitly stated in the supplied source. Do not invent dates,
-availability, licensing, or details. If evidence is insufficient, choose SKIP.
+availability, licensing, or details.
 
 Return exactly one JSON object and no other text:
-- Eligible: {{"decision":"POST","message":"<final Teams message>"}}
-- Ineligible: {{"decision":"SKIP","message":""}}
+{{"decision":"POST","message":"<final Teams message>"}}
 
-For POST, write the Teams message in Turkish. Keep the video title exactly as
+The "decision" field must always be the literal string "POST".
+
+Write the Teams message in Turkish. Keep the video title exactly as
 supplied in SOURCE; do not translate or rewrite it. Product names, the URL, and
 the published date must also remain unchanged. Use this structure:
 📌 [Original Title]
 🎥 T-Minus365 | 📅 [Published] | 🔗 [Link]
-🏷️ Etiket: [Microsoft 365, Azure veya Her İkisi]
+🏷️ Etiket: [Microsoft 365, Azure, Her İkisi veya Yok]
 
 Özet:
 - [ne değişti — bir satır, Türkçe]
 - [neden önemli — bir satır, Türkçe]
 - [kullanıma sunulma/yayın takvimi — yalnızca açıkça belirtilmişse, Türkçe]
+
+If the video does NOT report an actual Microsoft 365 or Azure product update
+(e.g. it's a tutorial, opinion, marketing, unrelated business content, or
+anything without a specific confirmed change), set the tag to "Yok" and
+write exactly this single line under "Özet:" and nothing else:
+- M365 hakkında bir gelişme/bilgi yok
 
 Apart from the original title and unchanged proper nouns/data specified above,
 all human-readable message text must be Turkish. Do not add an introduction,
@@ -184,11 +187,30 @@ def _looks_like_contract_message(message: str, link: str) -> bool:
     return True
 
 
+def _fallback_message(payload: dict[str, object]) -> str:
+    """Every video must produce a POST now, with no exceptions. If the local
+    model fails every retry attempt, this builds the message directly from
+    the trusted payload fields instead of leaving the video unpublished --
+    it can never hallucinate the title/date/link because it doesn't touch
+    the model at all.
+    """
+    return (
+        f"📌 {payload['title']}\n"
+        f"🎥 T-Minus365 | 📅 {payload['published']} | 🔗 {payload['link']}\n"
+        "🏷️ Etiket: Yok\n\n"
+        "Özet:\n"
+        "- M365 hakkında bir gelişme/bilgi yok"
+    )
+
+
 def _validated_analysis(raw: str, link: str) -> Analysis:
     analysis = parse_model_output(raw)
-    if analysis.decision == "POST" and not _looks_like_contract_message(
-        analysis.message, link
-    ):
+    if analysis.decision != "POST":
+        raise RuntimeError(
+            "Every video must be posted; local model returned "
+            f"{analysis.decision!r} instead of POST."
+        )
+    if not _looks_like_contract_message(analysis.message, link):
         raise RuntimeError(
             "Local model returned a POST message that did not follow the "
             "required Turkish/structured contract; discarding this attempt."
@@ -293,11 +315,11 @@ def classify_file(
     if analysis is None:
         print(
             "WARNING: local model failed every classification attempt for "
-            f"{payload.get('videoId', '?')}; defaulting to SKIP so the "
-            "pipeline can still publish and move on.",
+            f"{payload.get('videoId', '?')}; using a deterministic fallback "
+            "message so the video is still published as required.",
             file=sys.stderr,
         )
-        analysis = Analysis(decision="SKIP", message="")
+        analysis = Analysis(decision="POST", message=_fallback_message(payload))
 
     enriched = enrich_payload(payload, analysis)
     serialized = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"

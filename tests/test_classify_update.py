@@ -21,13 +21,23 @@ class ClassifyUpdateTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    def on_contract_json(self, payload, bullet="- Değişiklik uygulandı."):
+        message = (
+            f"📌 {payload['title']}\\n"
+            f"🎥 T-Minus365 | 📅 {payload['published']} | 🔗 {payload['link']}\\n"
+            "🏷️ Etiket: Microsoft 365\\n\\nÖzet:\\n"
+            f"{bullet}"
+        )
+        return f'{{"decision":"POST","message":"{message}"}}'
+
     def test_build_prompt_contains_source_and_requires_strict_json(self):
         prompt = classify_update.build_prompt(self.sample_payload())
 
         self.assertIn("A Microsoft 365 change", prompt)
         self.assertIn("starts rollout Monday", prompt)
         self.assertIn('"decision":"POST"', prompt)
-        self.assertIn('"decision":"SKIP"', prompt)
+        self.assertIn("no SKIP option", prompt)
+        self.assertIn("M365 hakkında bir gelişme/bilgi yok", prompt)
         self.assertIn("transcript is the primary source", prompt.lower())
 
     def test_build_prompt_requires_turkish_message_with_original_title(self):
@@ -35,7 +45,7 @@ class ClassifyUpdateTests(unittest.TestCase):
             self.sample_payload(title="Original English Video Title")
         )
 
-        self.assertIn("write the Teams message in Turkish", prompt)
+        self.assertIn("Write the Teams message in Turkish", prompt)
         self.assertIn("Keep the video title exactly as", prompt)
         self.assertIn("supplied in SOURCE; do not translate", prompt)
         self.assertIn("Original English Video Title", prompt)
@@ -125,38 +135,40 @@ class ClassifyUpdateTests(unittest.TestCase):
         self.assertEqual(enriched["message"], "📌 Final message")
 
     def test_classify_file_writes_valid_json_atomically(self):
+        payload = self.sample_payload()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
             path.write_text(
-                json.dumps(self.sample_payload(), ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 encoding="utf-8",
             )
 
             result = classify_update.classify_file(
                 path,
-                predictor=lambda _prompt: '{"decision":"SKIP","message":""}',
+                predictor=lambda _prompt: self.on_contract_json(payload),
             )
             written = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(result, path)
             self.assertEqual(written["schemaVersion"], 2)
-            self.assertEqual(written["decision"], "SKIP")
-            self.assertEqual(written["message"], "")
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn("📌", written["message"])
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
     def test_classify_file_retries_before_giving_up(self):
+        payload = self.sample_payload()
         calls = []
 
         def flaky_predictor(_prompt):
             calls.append(1)
             if len(calls) < 3:
                 return "not-json"
-            return '{"decision":"SKIP","message":""}'
+            return self.on_contract_json(payload)
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
             path.write_text(
-                json.dumps(self.sample_payload(), ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 encoding="utf-8",
             )
 
@@ -164,13 +176,43 @@ class ClassifyUpdateTests(unittest.TestCase):
             written = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(len(calls), 3)
-            self.assertEqual(written["decision"], "SKIP")
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn("📌", written["message"])
 
-    def test_classify_file_falls_back_to_skip_when_model_repeatedly_fails(self):
+    def test_classify_file_rejects_skip_and_retries(self):
+        # The model is never allowed to skip a video anymore -- if it
+        # returns SKIP, that's treated the same as any other off-contract
+        # attempt and gets retried like a failure.
+        payload = self.sample_payload()
+        calls = []
+
+        def skip_then_post(_prompt):
+            calls.append(1)
+            if len(calls) == 1:
+                return '{"decision":"SKIP","message":""}'
+            return self.on_contract_json(payload)
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
             path.write_text(
-                json.dumps(self.sample_payload(), ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(path, predictor=skip_then_post)
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(written["decision"], "POST")
+
+    def test_classify_file_falls_back_to_deterministic_post_when_model_repeatedly_fails(
+        self,
+    ):
+        payload = self.sample_payload()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
                 encoding="utf-8",
             )
 
@@ -182,10 +224,15 @@ class ClassifyUpdateTests(unittest.TestCase):
 
             self.assertEqual(result, path)
             self.assertEqual(written["schemaVersion"], 2)
-            self.assertEqual(written["decision"], "SKIP")
-            self.assertEqual(written["message"], "")
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn("📌 A Microsoft 365 change", written["message"])
+            self.assertIn(
+                "M365 hakkında bir gelişme/bilgi yok", written["message"]
+            )
 
-    def test_classify_file_downgrades_off_contract_post_message_to_skip(self):
+    def test_classify_file_downgrades_off_contract_post_to_deterministic_fallback(
+        self,
+    ):
         # Reproduces the 2026-08-19 incident: syntactically valid JSON,
         # decision claimed POST, but the message is unrelated freeform
         # English text with none of the required Turkish structure.
@@ -194,30 +241,7 @@ class ClassifyUpdateTests(unittest.TestCase):
             'where business meets technical and security becomes your '
             'differentiator. Signing off."}'
         )
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "latest.json"
-            path.write_text(
-                json.dumps(self.sample_payload(), ensure_ascii=False),
-                encoding="utf-8",
-            )
-
-            classify_update.classify_file(
-                path,
-                predictor=lambda _prompt: off_contract,
-            )
-            written = json.loads(path.read_text(encoding="utf-8"))
-
-            self.assertEqual(written["decision"], "SKIP")
-            self.assertEqual(written["message"], "")
-
-    def test_classify_file_accepts_on_contract_post_message(self):
         payload = self.sample_payload()
-        on_contract = (
-            '{"decision":"POST","message":"📌 A Microsoft 365 change\\n'
-            f'🎥 T-Minus365 | 📅 {payload["published"]} | 🔗 {payload["link"]}\\n'
-            '🏷️ Etiket: Microsoft 365\\n\\nÖzet:\\n- Değişiklik uygulandı."}'
-        )
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
@@ -228,12 +252,57 @@ class ClassifyUpdateTests(unittest.TestCase):
 
             classify_update.classify_file(
                 path,
-                predictor=lambda _prompt: on_contract,
+                predictor=lambda _prompt: off_contract,
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn(
+                "M365 hakkında bir gelişme/bilgi yok", written["message"]
+            )
+            self.assertNotIn("Above the Stack", written["message"])
+
+    def test_classify_file_accepts_on_contract_post_message(self):
+        payload = self.sample_payload()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: self.on_contract_json(payload),
             )
             written = json.loads(path.read_text(encoding="utf-8"))
 
             self.assertEqual(written["decision"], "POST")
             self.assertIn("📌", written["message"])
+
+    def test_classify_file_accepts_on_contract_no_update_message(self):
+        payload = self.sample_payload()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: self.on_contract_json(
+                    payload, bullet="- M365 hakkında bir gelişme/bilgi yok"
+                ),
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn(
+                "M365 hakkında bir gelişme/bilgi yok", written["message"]
+            )
 
     def test_build_prompt_truncates_overlong_transcript(self):
         payload = self.sample_payload(transcript="word " * 40_000)
