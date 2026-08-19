@@ -105,8 +105,20 @@ class WorkflowTests(unittest.TestCase):
         command = install_step["run"]
 
         self.assertIn("--no-binary=llama-cpp-python", command)
-        self.assertIn("--no-cache-dir", command)
+        # --no-cache-dir was removed on purpose: it disabled pip's wheel
+        # cache for this install, forcing a full source recompile on every
+        # single run (10+ minutes each time) even though the compiled
+        # wheel for an unchanged llama-cpp-python version could otherwise
+        # be reused via actions/setup-python's pip cache.
+        self.assertNotIn("--no-cache-dir", command)
         self.assertNotIn("abetlen.github.io", command)
+
+    def test_python_setup_caches_both_requirement_files(self):
+        setup_step = self.step_named("Set up Python")
+        cache_path = setup_step["with"]["cache-dependency-path"]
+
+        self.assertIn("requirements.txt", cache_path)
+        self.assertIn("requirements-ai.txt", cache_path)
 
 
 if __name__ == "__main__":

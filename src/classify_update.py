@@ -5,6 +5,7 @@ from typing import Any
 import argparse
 import json
 import os
+import sys
 
 
 SOURCE_FIELDS = (
@@ -26,6 +27,32 @@ REQUIRED_SOURCE_TEXT = (
     "transcript",
 )
 OUTPUT_FIELDS = SOURCE_FIELDS + ("decision", "message")
+
+# Some T-Minus365 feed entries are long-form streams rather than short update
+# videos (68k+ characters of transcript observed in practice). At the old
+# n_ctx=16384, a transcript that size alone tokenizes to ~20-21k tokens,
+# which overflows the model's context window before the system prompt,
+# instructions, and JSON contract are even considered. llama.cpp evicts from
+# the *front* of the prompt when that happens, so the instructions are what
+# get dropped -- the model is left freeform-completing off the tail of the
+# transcript with no idea it's supposed to classify anything or answer in
+# Turkish. Capping the transcript keeps the full instructions inside the
+# window regardless of video length; predict_local() also raises n_ctx for
+# extra headroom. See the 2026-08-19 "Above the Stack" incident.
+MAX_TRANSCRIPT_CHARS = 80_000
+
+# Retries give the model a second/third chance when it returns malformed
+# JSON or an off-contract message, instead of failing the whole GitHub
+# Actions job (which previously produced a red X for nearly every run where
+# the small local model hiccuped even slightly).
+MAX_ATTEMPTS = 3
+
+# A POST message that actually followed the prompt contract will always
+# contain these Turkish structural markers and the real video link. If any
+# are missing, the model drifted off-format (e.g. it hallucinated freeform
+# English text instead of a structured Turkish summary) and the message
+# must not be trusted, regardless of what "decision" it claimed.
+REQUIRED_POST_MARKERS = ("📌", "🎥 T-Minus365", "🏷️ Etiket", "Özet:")
 
 
 @dataclass(frozen=True)
@@ -50,6 +77,17 @@ def _validate_source(payload: dict[str, object]) -> None:
         )
     if not isinstance(payload["description"], str):
         raise RuntimeError("Transcript input description must be a string.")
+
+
+def _bounded_transcript(transcript: str, limit: int = MAX_TRANSCRIPT_CHARS) -> str:
+    stripped = transcript.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return (
+        stripped[:limit].rstrip()
+        + "\n\n[transcript truncated for length; base your answer on the "
+        "evidence above]"
+    )
 
 
 def build_prompt(payload: dict[str, object]) -> str:
@@ -94,7 +132,7 @@ Title: {payload['title']}
 Published: {payload['published']}
 Link: {payload['link']}
 Description: {payload['description']}
-Transcript: {payload['transcript']}
+Transcript: {_bounded_transcript(str(payload['transcript']))}
 """
 
 
@@ -132,6 +170,32 @@ def parse_model_output(raw: str) -> Analysis:
     return Analysis(decision=decision, message=message)
 
 
+def _looks_like_contract_message(message: str, link: str) -> bool:
+    """Defense-in-depth: confirm a POST message actually followed the
+    required Turkish/structured format instead of drifting into unrelated
+    freeform text. Catches cases where the model's JSON was syntactically
+    valid (so parse_model_output happily accepted it) but the content
+    itself ignored every instruction in the prompt.
+    """
+    if not all(marker in message for marker in REQUIRED_POST_MARKERS):
+        return False
+    if link not in message:
+        return False
+    return True
+
+
+def _validated_analysis(raw: str, link: str) -> Analysis:
+    analysis = parse_model_output(raw)
+    if analysis.decision == "POST" and not _looks_like_contract_message(
+        analysis.message, link
+    ):
+        raise RuntimeError(
+            "Local model returned a POST message that did not follow the "
+            "required Turkish/structured contract; discarding this attempt."
+        )
+    return analysis
+
+
 def enrich_payload(
     payload: dict[str, object],
     analysis: Analysis,
@@ -162,7 +226,11 @@ def _extract_chat_text(response: Any) -> str:
     return content
 
 
-def predict_local(prompt: str, model_path: Path | str) -> str:
+def predict_local(
+    prompt: str,
+    model_path: Path | str,
+    temperature: float = 0.0,
+) -> str:
     try:
         from llama_cpp import Llama
     except ImportError as error:
@@ -174,7 +242,7 @@ def predict_local(prompt: str, model_path: Path | str) -> str:
     threads = max(1, min(os.cpu_count() or 1, 4))
     model = Llama(
         model_path=str(resolved_model),
-        n_ctx=16384,
+        n_ctx=32768,
         n_threads=threads,
         n_batch=256,
         verbose=False,
@@ -187,7 +255,7 @@ def predict_local(prompt: str, model_path: Path | str) -> str:
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0,
+        temperature=temperature,
         max_tokens=512,
         response_format={"type": "json_object"},
     )
@@ -197,6 +265,7 @@ def predict_local(prompt: str, model_path: Path | str) -> str:
 def classify_file(
     path: Path | str,
     predictor: Callable[[str], str],
+    max_attempts: int = MAX_ATTEMPTS,
 ) -> Path:
     resolved_path = Path(path)
     try:
@@ -207,13 +276,52 @@ def classify_file(
         raise RuntimeError("Transcript input must be a JSON object.")
 
     prompt = build_prompt(payload)
-    analysis = parse_model_output(predictor(prompt))
+    link = str(payload.get("link", ""))
+
+    analysis: Analysis | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            analysis = _validated_analysis(predictor(prompt), link)
+            break
+        except RuntimeError as error:
+            print(
+                f"WARNING: classification attempt {attempt}/{max_attempts} "
+                f"failed: {error}",
+                file=sys.stderr,
+            )
+
+    if analysis is None:
+        print(
+            "WARNING: local model failed every classification attempt for "
+            f"{payload.get('videoId', '?')}; defaulting to SKIP so the "
+            "pipeline can still publish and move on.",
+            file=sys.stderr,
+        )
+        analysis = Analysis(decision="SKIP", message="")
+
     enriched = enrich_payload(payload, analysis)
     serialized = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"
     temporary_path = resolved_path.with_suffix(f"{resolved_path.suffix}.tmp")
     temporary_path.write_text(serialized, encoding="utf-8")
     temporary_path.replace(resolved_path)
     return resolved_path
+
+
+def _local_predictor(model_path: Path) -> Callable[[str], str]:
+    call_count = 0
+
+    def predict(prompt: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        # First attempt stays deterministic (temperature=0); if that
+        # attempt's output gets rejected (bad JSON or off-contract
+        # message), retries add a little randomness so the model has a
+        # real chance of landing somewhere different instead of
+        # regenerating byte-identical output.
+        temperature = 0.0 if call_count == 1 else 0.4
+        return predict_local(prompt, model_path, temperature=temperature)
+
+    return predict
 
 
 def main() -> None:
@@ -223,7 +331,7 @@ def main() -> None:
     arguments = parser.parse_args()
     result = classify_file(
         arguments.input,
-        predictor=lambda prompt: predict_local(prompt, arguments.model),
+        predictor=_local_predictor(arguments.model),
     )
     payload = json.loads(result.read_text(encoding="utf-8"))
     print(f"ANALYSIS: {payload['decision']}")

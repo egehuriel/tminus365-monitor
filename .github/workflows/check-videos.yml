@@ -32,6 +32,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ai.txt
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
@@ -76,7 +79,6 @@ jobs:
         if: steps.analysis.outputs.should_run == 'true'
         run: >-
           python -m pip install
-          --no-cache-dir
           --no-binary=llama-cpp-python
           -r requirements-ai.txt
 

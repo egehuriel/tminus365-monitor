@@ -144,19 +144,105 @@ class ClassifyUpdateTests(unittest.TestCase):
             self.assertEqual(written["message"], "")
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
-    def test_classify_file_preserves_v1_file_when_prediction_fails(self):
+    def test_classify_file_retries_before_giving_up(self):
+        calls = []
+
+        def flaky_predictor(_prompt):
+            calls.append(1)
+            if len(calls) < 3:
+                return "not-json"
+            return '{"decision":"SKIP","message":""}'
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.json"
-            original = json.dumps(self.sample_payload(), ensure_ascii=False)
-            path.write_text(original, encoding="utf-8")
+            path.write_text(
+                json.dumps(self.sample_payload(), ensure_ascii=False),
+                encoding="utf-8",
+            )
 
-            with self.assertRaisesRegex(RuntimeError, "valid JSON"):
-                classify_update.classify_file(
-                    path,
-                    predictor=lambda _prompt: "not-json",
-                )
+            classify_update.classify_file(path, predictor=flaky_predictor)
+            written = json.loads(path.read_text(encoding="utf-8"))
 
-            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(written["decision"], "SKIP")
+
+    def test_classify_file_falls_back_to_skip_when_model_repeatedly_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(self.sample_payload(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            result = classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: "not-json",
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(result, path)
+            self.assertEqual(written["schemaVersion"], 2)
+            self.assertEqual(written["decision"], "SKIP")
+            self.assertEqual(written["message"], "")
+
+    def test_classify_file_downgrades_off_contract_post_message_to_skip(self):
+        # Reproduces the 2026-08-19 incident: syntactically valid JSON,
+        # decision claimed POST, but the message is unrelated freeform
+        # English text with none of the required Turkish structure.
+        off_contract = (
+            '{"decision":"POST","message":"Welcome to Above the Stack, '
+            'where business meets technical and security becomes your '
+            'differentiator. Signing off."}'
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(self.sample_payload(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: off_contract,
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(written["decision"], "SKIP")
+            self.assertEqual(written["message"], "")
+
+    def test_classify_file_accepts_on_contract_post_message(self):
+        payload = self.sample_payload()
+        on_contract = (
+            '{"decision":"POST","message":"📌 A Microsoft 365 change\\n'
+            f'🎥 T-Minus365 | 📅 {payload["published"]} | 🔗 {payload["link"]}\\n'
+            '🏷️ Etiket: Microsoft 365\\n\\nÖzet:\\n- Değişiklik uygulandı."}'
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: on_contract,
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(written["decision"], "POST")
+            self.assertIn("📌", written["message"])
+
+    def test_build_prompt_truncates_overlong_transcript(self):
+        payload = self.sample_payload(transcript="word " * 40_000)
+        prompt = classify_update.build_prompt(payload)
+
+        self.assertLessEqual(
+            len(prompt), classify_update.MAX_TRANSCRIPT_CHARS + 2_000
+        )
+        self.assertIn("[transcript truncated for length", prompt)
 
 
 if __name__ == "__main__":
