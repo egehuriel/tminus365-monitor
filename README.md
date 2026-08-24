@@ -76,10 +76,6 @@ On a new video, GitHub Actions:
 
 No model API key is required; inference runs on the GitHub-hosted runner.
 
-> [!IMPORTANT]
-> `outbox/latest.json` contains the complete transcript and is committed to the
-> repository. In a public repository, that file is publicly accessible.
-
 ## Run locally
 
 Python 3.12 is the supported runtime.
