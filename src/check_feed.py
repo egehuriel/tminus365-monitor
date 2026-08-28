@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import json
 import os
+import time
 import xml.etree.ElementTree as ElementTree
 
 if __package__:
@@ -22,6 +23,18 @@ FEED_URL = (
 )
 SUPADATA_TRANSCRIPT_URL = "https://api.supadata.ai/v1/transcript"
 DEFAULT_STATE_PATH = Path("state/last_video_id.txt")
+
+# YouTube's Atom feed is an unofficial, undocumented endpoint with no SLA.
+# It has been observed returning HTTP 404 for this channel for hours at a
+# stretch (e.g. the 2026-08-26 incident: every 30-minute run failed with
+# "YouTube feed request failed with HTTP 404" for several hours overnight,
+# then recovered on its own) even though nothing about the repo, the
+# channel, or the request changed. A handful of retries with a short delay
+# lets a brief blip clear within one run; if the feed is still down after
+# that, `run()` treats it as a transient, retry-next-cycle condition
+# instead of failing the whole GitHub Actions job.
+FEED_RETRY_ATTEMPTS = 3
+FEED_RETRY_DELAY_SECONDS = 20
 ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
 MEDIA_NAMESPACE = "http://search.yahoo.com/mrss/"
 YOUTUBE_NAMESPACE = "http://www.youtube.com/xml/schemas/2015"
@@ -124,6 +137,41 @@ def get_latest_video(
         published=published,
         link=link,
         description=str(entry.get("summary", "")).strip(),
+    )
+
+
+def get_latest_video_with_retries(
+    feed_url: str = FEED_URL,
+    parser: Callable[[str], Any] = parse_feed,
+    attempts: int = FEED_RETRY_ATTEMPTS,
+    delay: float = FEED_RETRY_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[Video | None, RuntimeError | None]:
+    """Fetch the latest video, retrying transient feed failures.
+
+    Returns (video, None) on success, or (None, last_error) if every
+    attempt failed. Never raises for a plain feed failure -- that lets the
+    caller decide whether to skip this cycle quietly instead of failing
+    the job for what is usually a temporary YouTube-side hiccup.
+    """
+    last_error: RuntimeError | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return get_latest_video(feed_url=feed_url, parser=parser), None
+        except RuntimeError as error:
+            last_error = error
+            if attempt < attempts:
+                sleep(delay)
+    return None, last_error
+
+
+def format_feed_unavailable(error: RuntimeError | None) -> str:
+    return "\n\n".join(
+        [
+            "STATUS:\nFEED UNAVAILABLE",
+            f"REASON:\n{error}",
+            "NOTE:\nSkipping this cycle; the next scheduled run will retry.",
+        ]
     )
 
 
@@ -235,8 +283,19 @@ def run(
     exporter: Callable[
         [dict[str, object], Path | str], Path
     ] = transcript_export.write_latest,
+    feed_retry_attempts: int = FEED_RETRY_ATTEMPTS,
+    feed_retry_delay: float = FEED_RETRY_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    video = get_latest_video(feed_url=feed_url, parser=parser)
+    video, feed_error = get_latest_video_with_retries(
+        feed_url=feed_url,
+        parser=parser,
+        attempts=feed_retry_attempts,
+        delay=feed_retry_delay,
+        sleep=sleep,
+    )
+    if video is None:
+        return format_feed_unavailable(feed_error)
     resolved_state_path = Path(state_path) if state_path is not None else None
     if (
         not force_export

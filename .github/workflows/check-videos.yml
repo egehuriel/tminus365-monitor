@@ -21,7 +21,14 @@ concurrency:
 jobs:
   check-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Local classification (n_ctx=32768, up to 3 attempts) can take well
+    # over 15 minutes by itself on a long transcript, on top of setup and
+    # the model build/download. 20 minutes was too tight: the 2026-08-27
+    # runs were killed by this timeout mid-classification, and because the
+    # job never reached the concurrency-releasing final steps, several
+    # subsequent scheduled ticks were dropped while the group was locked,
+    # producing multi-hour gaps instead of the usual 30-minute cadence.
+    timeout-minutes: 40
 
     steps:
       - name: Check out repository

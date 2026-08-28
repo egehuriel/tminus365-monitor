@@ -146,6 +146,57 @@ class CheckFeedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no YouTube video ID"):
             check_feed.get_latest_video(parser=lambda _: parsed_feed)
 
+    def test_get_latest_video_with_retries_recovers_after_transient_failure(self):
+        healthy_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+        broken_feed = SimpleNamespace(status=404, entries=[])
+        responses = [broken_feed, broken_feed, healthy_feed]
+        sleeps = []
+
+        def parser(_url):
+            return responses.pop(0)
+
+        video, error = check_feed.get_latest_video_with_retries(
+            parser=parser,
+            attempts=3,
+            delay=20,
+            sleep=sleeps.append,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(video.id, "abc123xyz89")
+        self.assertEqual(sleeps, [20, 20])
+
+    def test_get_latest_video_with_retries_returns_last_error_after_exhausting_attempts(
+        self,
+    ):
+        broken_feed = SimpleNamespace(status=404, entries=[])
+        sleeps = []
+
+        video, error = check_feed.get_latest_video_with_retries(
+            parser=lambda _url: broken_feed,
+            attempts=3,
+            delay=5,
+            sleep=sleeps.append,
+        )
+
+        self.assertIsNone(video)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertRegex(str(error), "HTTP 404")
+        self.assertEqual(sleeps, [5, 5])
+
+    def test_get_latest_video_with_retries_does_not_sleep_on_first_success(self):
+        parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
+        sleeps = []
+
+        video, error = check_feed.get_latest_video_with_retries(
+            parser=lambda _url: parsed_feed,
+            sleep=sleeps.append,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(video.id, "abc123xyz89")
+        self.assertEqual(sleeps, [])
+
     def test_get_transcript_joins_nonempty_snippets(self):
         requests = []
 
@@ -249,6 +300,35 @@ class CheckFeedTests(unittest.TestCase):
         self.assertIn("STATUS:\nALREADY PROCESSED", output)
         self.assertIn("VIDEO ID:\nabc123xyz89", output)
         self.assertNotIn("TRANSCRIPT:", output)
+
+    def test_run_skips_gracefully_when_feed_is_unavailable(self):
+        broken_feed = SimpleNamespace(status=404, entries=[])
+
+        def unexpected_opener(_request, timeout):
+            self.fail(
+                f"Supadata must not be called when the feed is down (timeout={timeout})"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state" / "last_video_id.txt"
+            output_path = Path(directory) / "outbox" / "latest.json"
+
+            output = check_feed.run(
+                parser=lambda _url: broken_feed,
+                api_key="secret-value",
+                opener=unexpected_opener,
+                state_path=state_path,
+                output_path=output_path,
+                feed_retry_attempts=3,
+                feed_retry_delay=5,
+                sleep=lambda _seconds: None,
+            )
+
+            self.assertFalse(output_path.exists())
+            self.assertFalse(state_path.exists())
+
+        self.assertIn("STATUS:\nFEED UNAVAILABLE", output)
+        self.assertIn("HTTP 404", output)
 
     def test_run_persists_video_id_after_transcript_success(self):
         parsed_feed = SimpleNamespace(status=200, entries=[sample_entry()])
