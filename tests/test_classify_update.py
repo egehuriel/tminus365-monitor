@@ -40,6 +40,22 @@ class ClassifyUpdateTests(unittest.TestCase):
         self.assertIn("M365 hakkında bir gelişme/bilgi yok", prompt)
         self.assertIn("transcript is the primary source", prompt.lower())
 
+    def test_build_prompt_requires_full_summary_even_when_tag_is_yok(self):
+        # Regression test for the 2026-08-30 incident: a video titled
+        # "What's New in Microsoft 365 (Latest Updates)" packed with
+        # specific, dated feature rollouts got tagged "Yok" and its entire
+        # summary collapsed to the single generic "no update" line,
+        # discarding everything the video actually said. The prompt must
+        # now require a real content summary regardless of the tag.
+        prompt = classify_update.build_prompt(self.sample_payload())
+
+        self.assertIn("must NEVER collapse to a single generic line", prompt)
+        self.assertIn("Do not stop after that line", prompt)
+        self.assertIn(
+            "immediately continue with additional bullets summarizing",
+            prompt,
+        )
+
     def test_build_prompt_requires_turkish_message_with_original_title(self):
         prompt = classify_update.build_prompt(
             self.sample_payload(title="Original English Video Title")
@@ -262,6 +278,36 @@ class ClassifyUpdateTests(unittest.TestCase):
             )
             self.assertNotIn("Above the Stack", written["message"])
 
+    def test_classify_file_fallback_still_surfaces_video_description(self):
+        # The deterministic fallback can't summarize the transcript (it
+        # never touches the model), but it must not go back to discarding
+        # everything either -- it should at least carry the video's own
+        # YouTube description through instead of a single bare line.
+        payload = self.sample_payload(
+            description="Microsoft announced several rollout changes."
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            classify_update.classify_file(
+                path,
+                predictor=lambda _prompt: "not-json",
+            )
+            written = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertIn(
+                "M365 hakkında bir gelişme/bilgi yok", written["message"]
+            )
+            self.assertIn(
+                "Microsoft announced several rollout changes.",
+                written["message"],
+            )
+
     def test_classify_file_accepts_on_contract_post_message(self):
         payload = self.sample_payload()
 
@@ -308,8 +354,14 @@ class ClassifyUpdateTests(unittest.TestCase):
         payload = self.sample_payload(transcript="word " * 40_000)
         prompt = classify_update.build_prompt(payload)
 
+        # 3_500 covers the fixed instructional scaffolding around the
+        # transcript (larger now that the prompt spells out the
+        # always-summarize-content requirement -- see
+        # test_build_prompt_requires_full_summary_even_when_tag_is_yok),
+        # plus the "[transcript truncated...]" suffix. This still leaves
+        # the total well inside the model's 32768-token context window.
         self.assertLessEqual(
-            len(prompt), classify_update.MAX_TRANSCRIPT_CHARS + 2_000
+            len(prompt), classify_update.MAX_TRANSCRIPT_CHARS + 3_500
         )
         self.assertIn("[transcript truncated for length", prompt)
 

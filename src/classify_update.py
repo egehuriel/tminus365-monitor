@@ -93,12 +93,16 @@ def _bounded_transcript(transcript: str, limit: int = MAX_TRANSCRIPT_CHARS) -> s
 def build_prompt(payload: dict[str, object]) -> str:
     _validate_source(payload)
     return f"""You review one T-Minus365 YouTube video and always produce a
-Teams post for it. There is no SKIP option -- every video gets a message.
+Teams post for it. There is no SKIP option -- every video gets a message,
+and that message must always summarize what the video actually covers.
 
-Determine whether it reports an actual Microsoft 365 or Azure product update,
-feature announcement, rollout, retirement, deprecation, policy change, licensing
-change, or roadmap change. The transcript is the primary source of truth. Use the
-title and description only as supporting context.
+First, determine whether the video reports specific, confirmed Microsoft 365
+or Azure product updates, feature announcements, rollouts, retirements,
+deprecations, policy changes, licensing changes, or roadmap changes, as
+opposed to a tutorial, opinion piece, marketing, or unrelated business
+content. The transcript is the primary source of truth for both this
+determination and the summary below. Use the title and description only as
+supporting context.
 
 Use only facts explicitly stated in the supplied source. Do not invent dates,
 availability, licensing, or details.
@@ -116,15 +120,30 @@ the published date must also remain unchanged. Use this structure:
 🏷️ Etiket: [Microsoft 365, Azure, Her İkisi veya Yok]
 
 Özet:
-- [ne değişti — bir satır, Türkçe]
-- [neden önemli — bir satır, Türkçe]
-- [kullanıma sunulma/yayın takvimi — yalnızca açıkça belirtilmişse, Türkçe]
+- [her zaman doldurulur: transkriptte anlatılan somut konuların/güncelleme-
+   lerin Türkçe özeti. Bir video birden fazla ayrı konuyu/güncellemeyi
+   kapsıyorsa, her biri kendi maddesinde yer almalı -- tek bir maddeye
+   sıkıştırmayın]
+- [belirtilmişse: kullanıma sunulma/yayın takvimi, hangi ürün/plan/rol için
+   olduğu gibi ek somut detaylar, her biri ayrı bir maddede]
 
-If the video does NOT report an actual Microsoft 365 or Azure product update
-(e.g. it's a tutorial, opinion, marketing, unrelated business content, or
-anything without a specific confirmed change), set the tag to "Yok" and
-write exactly this single line under "Özet:" and nothing else:
+The "Özet" section must NEVER collapse to a single generic line just because
+the video is a roundup of many small items, uses casual/imprecise language,
+or is only loosely related to Microsoft 365. Summarize everything concrete
+that is actually said, even when none of it amounts to one single official
+announcement. Only leave "Özet" with nothing to report when the transcript
+truly contains no discernible topic at all (e.g. it is empty or pure
+filler).
+
+If the video does NOT report a confirmed Microsoft 365 or Azure product
+update, set the tag to "Yok" and make the FIRST bullet under "Özet:" this
+exact line, then immediately continue with additional bullets summarizing
+everything the video actually covers, exactly as you would for any other
+video:
 - M365 hakkında bir gelişme/bilgi yok
+Do not stop after that line. Only that single line, with no further
+bullets, is acceptable when the transcript genuinely has no content to
+summarize.
 
 Apart from the original title and unchanged proper nouns/data specified above,
 all human-readable message text must be Turkish. Do not add an introduction,
@@ -193,13 +212,25 @@ def _fallback_message(payload: dict[str, object]) -> str:
     the trusted payload fields instead of leaving the video unpublished --
     it can never hallucinate the title/date/link because it doesn't touch
     the model at all.
+
+    It still surfaces the video's own YouTube description (when present)
+    as a second bullet, so a repeated model failure doesn't silently
+    discard every bit of information about what the video covers -- only
+    the "is this a confirmed M365/Azure update" judgment call is skipped,
+    since that genuinely requires reading the transcript.
     """
+    description = str(payload.get("description", "")).strip()
+    bullets = [
+        "- M365 hakkında bir gelişme/bilgi yok "
+        "(otomatik sınıflandırma başarısız oldu; video incelenemedi)"
+    ]
+    if description:
+        bullets.append(f"- Video açıklaması (YouTube): {description}")
     return (
         f"📌 {payload['title']}\n"
         f"🎥 T-Minus365 | 📅 {payload['published']} | 🔗 {payload['link']}\n"
         "🏷️ Etiket: Yok\n\n"
-        "Özet:\n"
-        "- M365 hakkında bir gelişme/bilgi yok"
+        "Özet:\n" + "\n".join(bullets)
     )
 
 

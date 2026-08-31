@@ -28,7 +28,7 @@ jobs:
     # job never reached the concurrency-releasing final steps, several
     # subsequent scheduled ticks were dropped while the group was locked,
     # producing multi-hour gaps instead of the usual 30-minute cadence.
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
